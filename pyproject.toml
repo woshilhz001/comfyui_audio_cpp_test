@@ -1,0 +1,14 @@
+[project]
+name = "comfyui-audio-cpp"
+version = "0.2.0"
+description = "ComfyUI custom nodes for the local audio.cpp server (TTS, ASR, model unload)."
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.comfy]
+PublisherId = ""
+PublisherName = ""
+DisplayName = "AudioCpp Server Nodes"
+Description = "TTS、ASR 与显存/内存卸载节点,基于本地 audiocpp_server HTTP API。"
+Tags = "audio,tts,asr,unload"
+Icon = ""
