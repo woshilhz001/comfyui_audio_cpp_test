@@ -597,6 +597,49 @@ def spec_languages(family: str) -> list[str]:
     return info.get("languages", [])
 
 
+# spec languages 里非具体语言代码的占位值:表示「模型声明了语言范围,
+# 但不适合做成固定下拉」(如 "600+ languages"、"multilingual")。
+_NON_CONCRETE_LANG_MARKERS = {
+    "auto", "multilingual", "language_agnostic", "music", "nospeech",
+}
+
+
+def lang_is_concrete(lang: str) -> bool:
+    """该 spec 语言条目是否是具体语言代码(可放进语言下拉)。
+
+    排除 "80+ languages"、"50+ languages"、"multilingual"、"nospeech"
+    这类描述性/占位条目。
+    """
+    if lang in _NON_CONCRETE_LANG_MARKERS:
+        return False
+    if "+" in lang and "languages" in lang:
+        return False
+    return True
+
+
+def family_language_options(family: str, first: str = "",
+                            fallback: tuple[str, ...] = (
+                                "en", "zh", "ja", "ko", "de", "fr",
+                                "ru", "es", "it", "pt", "yue",
+                            ),
+                            compat: tuple[str, ...] = ()) -> list[str]:
+    """家族语言下拉选项(TTS/ASR 节点共享)。
+
+    - 数据源:spec 的 languages 字段(经 lang_is_concrete 过滤占位条目);
+    - spec 无具体语言时退回 fallback 常见语言代码;
+    - compat 里的旧 workflow 兼容别名始终保留(跳过重复),保证历史
+      工作流的值不因下拉校验失败被拒;
+    - 首项为 first(TTS 用 ""=自动,ASR 用 "auto"=自动检测)。
+    """
+    concrete = [l for l in spec_languages(family) if lang_is_concrete(l)]
+    if not concrete:
+        concrete = list(fallback)
+    for c in compat:
+        if c not in concrete:
+            concrete.append(c)
+    return [first] + concrete
+
+
 # 显式「spec 家族 → 手工档案 id」覆盖关系。
 # 手工档案的 key 是「服务器配置的模型 id」(server.json 里的 id),可能与 spec
 # 家族名不同(如 muscriptor_small ← family muscriptor)。只有这里列出的 spec

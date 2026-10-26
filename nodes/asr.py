@@ -4,6 +4,10 @@
 上传前把 AUDIO 波形在本地编码为 WAV(multipart/form-data,file 字段),
 这是服务器端唯一保证支持的输入格式(mp3/flac 解码是可选的)。
 
+「model」用 DynamicCombo:选择模型族后只显示该族支持的语言下拉
+(来自 model_specs 的 languages 字段,过滤 "50+ languages" 等占位条目);
+prompt 对所有 ASR 家族都适用,保留在节点顶层。
+
 输出类型:
 - text      : 转写文本(STRING)
 - language  : 检测/配置的语言代码(STRING)
@@ -13,23 +17,41 @@
 
 from __future__ import annotations
 
+import json
+
 from comfy_api.latest import Input, io
 
 from ..audio_cpp_client import AudioCppError, build_base_url, check_server, transcribe
 from ..audio_codec import audio_dict_to_wav_bytes
 from ..config import DEFAULT_HOST, DEFAULT_PORT
-from ..model_profiles import all_family_options
+from ..model_profiles import all_family_options, family_language_options
 
 
-def _asr_model_options() -> list[str]:
-    """ASR 模型下拉:手工档案(qwen3_asr)+ 自动发现的 spec ASR 家族。
+def _asr_options() -> list[io.DynamicCombo.Option]:
+    """ASR 模型 DynamicCombo 选项:每个家族 Option 只含该族支持的语言下拉。
 
-    注意:transcriptions 端点的 multipart 表单只接受 file/model/language/prompt
-    字段,家族专属参数(options)无法经 multipart 传入;因此这里只提供「模型 id
-    选择」,不展示各家族的参数下拉。
+    注意:transcriptions 端点的 multipart 表单只接受
+    file / model / language / prompt 字段,家族专属参数无法经 multipart
+    传入;因此 Option 里只有 language 一项(prompt 在节点顶层)。
+    语言来自 model_specs 的 languages 字段(占位条目已过滤),
+    首项 "auto" 表示自动检测;spec 未声明语言时退回常见语言代码。
     """
-    families = list(all_family_options("asr").keys())
-    return families if families else ["qwen3_asr"]
+    options = []
+    for family in all_family_options("asr"):
+        options.append(io.DynamicCombo.Option(
+            family,
+            [io.Combo.Input(
+                "language",
+                display_name="语言",
+                options=family_language_options(family, first="auto"),
+                default="auto",
+                tooltip=(
+                    "该模型支持的语言(来自 model spec)。"
+                    "auto = 服务器自动检测。"
+                ),
+            )],
+        ))
+    return options
 
 
 class AudioCppSpeechToText(io.ComfyNode):
@@ -46,6 +68,7 @@ class AudioCppSpeechToText(io.ComfyNode):
                 "(如 qwen3_asr、sense_asr、moonshine_asr 等),\n"
                 "返回转写文本。上传前会把波形在本地编码为 WAV(multipart file 字段),\n"
                 "这是服务器端唯一保证支持的输入格式。\n\n"
+                "「模型」下拉是动态的:选择模型族后只显示该模型支持的语言。\n"
                 "需要本地已启动 audiocpp_server(默认 http://127.0.0.1:8085)。\n"
                 "若服务器未启动或请求失败,节点会报错并给出服务器原始错误消息。"
             ),
@@ -56,12 +79,14 @@ class AudioCppSpeechToText(io.ComfyNode):
                     display_name="音频",
                     tooltip="要转写的音频(waveform [B,C,T])。",
                 ),
-                io.Combo.Input(
+                io.DynamicCombo.Input(
                     "model",
                     display_name="模型",
-                    options=_asr_model_options(),
-                    default="qwen3_asr",
-                    tooltip="ASR 模型 id(来自 server.json 配置,自动发现 spec 家族)。",
+                    options=_asr_options(),
+                    tooltip=(
+                        "ASR 模型 id(来自 server.json 配置,自动发现 spec 家族)。\n"
+                        "选择后只显示该模型支持的语言。"
+                    ),
                 ),
                 io.String.Input(
                     "host",
@@ -76,16 +101,6 @@ class AudioCppSpeechToText(io.ComfyNode):
                     min=1,
                     max=65535,
                     tooltip="audio.cpp 服务器端口(默认 8085)。",
-                ),
-                io.Combo.Input(
-                    "language",
-                    display_name="语言",
-                    options=["auto", "zh", "en", "yue", "ja", "ko", "de", "fr", "es", "zh dialects"],
-                    default="auto",
-                    tooltip=(
-                        "音频语言代码(自动检测 / 指定语言)。留空或 auto 表示自动检测。\n"
-                        "qwen3_asr 支持 30+ 种语言,常见列表见上。"
-                    ),
                 ),
                 io.String.Input(
                     "prompt",
@@ -145,11 +160,10 @@ class AudioCppSpeechToText(io.ComfyNode):
     async def execute(
         cls,
         audio: Input.Audio,
-        model: str,
+        model: dict,
         host: str,
         port: int,
         timeout_seconds: float,
-        language: str = "",
         prompt: str = "",
         unload_after_execute: bool = False,
         auto_register: bool = True,
@@ -157,6 +171,15 @@ class AudioCppSpeechToText(io.ComfyNode):
         # audio 是必填输入;缺失或为空时先给出明确错误,避免 numpy 底层晦涩异常。
         if audio is None:
             raise AudioCppError("语音转文本需要连接「audio」输入(要转写的音频)。")
+        if not isinstance(model, dict) or "model" not in model:
+            raise AudioCppError("模型参数无效:缺少选择的模型 id。")
+        family = model["model"]
+        if family not in all_family_options("asr"):
+            raise AudioCppError(
+                f"未知 ASR 模型族: {family}。该模型未在 model_specs/ 或本节点档案中定义。"
+            )
+        # 语言从 DynamicCombo 的 family Option dict 读取(每族只显示自己支持的语言)
+        language = str(model.get("language", "") or "")
         wav_bytes = audio_dict_to_wav_bytes(audio)
         base_url = build_base_url(host, port)
         check_server(base_url)
@@ -169,7 +192,7 @@ class AudioCppSpeechToText(io.ComfyNode):
         if auto_register:
             await run_interruptible(
                 to_interruptible(ensure_model_registered)(
-                    base_url, model, timeout=float(timeout_seconds)
+                    base_url, family, timeout=float(timeout_seconds)
                 ),
                 base_url=base_url,
             )
@@ -178,7 +201,7 @@ class AudioCppSpeechToText(io.ComfyNode):
             result = await run_interruptible(
                 to_interruptible(transcribe)(
                     base_url,
-                    model,
+                    family,
                     wav_bytes,
                     language=(language if language and language != "auto" else None),
                     prompt=prompt.strip() or None,
@@ -197,7 +220,5 @@ class AudioCppSpeechToText(io.ComfyNode):
             raise AudioCppError(f"ASR 响应格式异常:{result!r}")
         text = result.get("text", "")
         lang = result.get("language", "")
-        import json
-
         detail = json.dumps(result, ensure_ascii=False)
         return io.NodeOutput(text, lang or "", detail)

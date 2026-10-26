@@ -25,14 +25,16 @@ from ..audio_cpp_client import (
 )
 from ..audio_codec import audio_dict_to_wav_bytes, wav_bytes_to_audio_dict
 from ..config import DEFAULT_HOST, DEFAULT_PORT
-from ..model_profiles import all_family_options, spec_languages
+from ..model_profiles import all_family_options, family_language_options
 
 
 # DynamicCombo option 里排除,放到节点顶层的字段(类型不放进下拉)。
 # reference_text 必须在内:否则它会同时出现在顶层面和 DynamicCombo 下拉里,
 # 造成 qwen3_tts_base 等家族出现两个 reference_text 输入的界面 bug。
 # voice 同样由顶层输入承接(qwen3_tts_customvoice 等内置音色下拉),避免重复。
-TOP_LEVEL_FIELDS = {"voice_ref", "reference_text", "language", "seed", "instructions", "voice"}
+# language 不再顶层承接:它是家族相关的(每个模型支持的语言不同),
+# 改由 _tts_options() 放进各家族自己的下拉,只显示该模型支持的语言。
+TOP_LEVEL_FIELDS = {"voice_ref", "reference_text", "seed", "instructions", "voice"}
 
 
 def _input_for(param_id: str, spec):
@@ -64,10 +66,21 @@ def _input_for(param_id: str, spec):
     raise ValueError(f"未知参数类型: {kind}")
 
 
+# 旧 TTS 语言下拉的兼容别名(历史 STRING 输入留下的值),保证已有工作流
+# 的 language 值不因家族语言下拉校验失败而整图被拒。
+# 语言选项本身由 model_profiles.family_language_options 按 spec 生成。
+_TTS_LANG_COMPAT = (
+    "auto", "中文 (Chinese)", "中文", "英语 (English)", "英语",
+    "custom", "chinese", "mandarin",
+)
+
+
 def _tts_options():
     """为每个 TTS 模型族构建 DynamicCombo.Option(排除顶层字段,避免重复)。
 
     参数来源 = 手工档案(TTS_PROFILES)+ 自动发现的 model_specs 新家族。
+    每个家族额外生成自己的 language 下拉(只显示该模型支持的语言),
+    取代原来顶层的通用语言下拉 —— 语言是家族相关的。
     空下拉族(spec 无参数、或参数全被提升到顶层)补一个通用 seed 输入,
     保证下拉总有一个可选项 —— 否则 ComfyUI 的 DynamicCombo 无法选中该族。
     """
@@ -75,15 +88,23 @@ def _tts_options():
     for family, params in all_family_options("tts").items():
         inputs = []
         for name, spec in params.items():
-            if name in TOP_LEVEL_FIELDS:
+            # language 由下面的家族专属下拉承接,档案里的 language 参数跳过,
+            # 避免同一族出现两个语言输入。
+            if name in TOP_LEVEL_FIELDS or name == "language":
                 continue
             inp = _input_for(name, spec)
             if inp is not None:
                 inputs.append(inp)
-        if not inputs:
-            # 空下拉族:补通用 seed,保证下拉有选项可选。
-            inputs.append(io.Int.Input("seed", display_name="随机种子", default=-1, min=-1,
-                                       tooltip="随机种子,-1 由服务器决定,不传该参数。"))
+        # 每个家族自己的 language 下拉(只显示该模型支持的语言)
+        # —— 每个 Option 至少含这一个输入,DynamicCombo 总能选中该族。
+        lang_opts = family_language_options(family, first="", compat=_TTS_LANG_COMPAT)
+        inputs.append(io.Combo.Input(
+            "language",
+            display_name="语言",
+            options=lang_opts,
+            default="",
+            tooltip="该模型支持的语言。留空表示自动检测。",
+        ))
         options.append(io.DynamicCombo.Option(family, inputs))
     return options
 
@@ -118,29 +139,6 @@ def _voice_options() -> list[str]:
     except Exception:
         pass
     return [""] + static
-
-
-def _language_options() -> list[str]:
-    """语言下拉选项。
-
-    - 数据源:各家族 model_specs languages 的并集;
-    - 额外固定写入常见语言代码与旧 workflow 兼容别名(中文显示名等),
-      保证已有工作流里的 language 值不会因下拉校验失败而整图被拒。
-    - 首项为空字符串("")表示「自动/不指定」,与 default="" 对齐。
-    """
-    # 固定选项:常见语言代码 + 旧工作流的兼容值(历史 STRING 输入留下的)
-    fixed = [
-        "auto", "english", "zh", "en", "ja", "ko", "de", "fr", "ru", "es",
-        "it", "pt", "yue",
-        # ----- 旧 workflow 兼容别名(保持在校验集合内) -----
-        "中文 (Chinese)", "中文", "英语 (English)", "英语",
-        "custom", "chinese", "mandarin",
-    ]
-    langs = set(fixed)
-    for family in all_family_options("tts"):
-        langs.update(spec_languages(family))
-    # 保持 fixed 的顺序,spec 补充的语言追加在后;首项为空字符串(自动)
-    return [""] + fixed + sorted(langs - set(fixed))
 
 
 class AudioCppTextToSpeech(io.ComfyNode):
@@ -211,13 +209,6 @@ class AudioCppTextToSpeech(io.ComfyNode):
                         "下拉选项来自服务器 /v1/audio/voices(在线时)或内置兜底列表;\n"
                         "留空则不传该参数(克隆模型用参考音频);非列表值(如自定义音色路径)执行时原样透传给服务器。"
                     ),
-                ),
-                io.Combo.Input(
-                    "language",
-                    display_name="语言",
-                    options=_language_options(),
-                    default="",
-                    tooltip="语言代码(来自 audio.cpp 各家族的 languages)。留空或 auto 表示自动。",
                 ),
                 io.Int.Input(
                     "seed",
@@ -292,7 +283,6 @@ class AudioCppTextToSpeech(io.ComfyNode):
         reference_text: str = "",
         instructions: str = "",
         voice: str = "",
-        language: str = "english",
         seed: int = -1,
         unload_after_execute: bool = False,
         auto_register: bool = True,
@@ -312,13 +302,13 @@ class AudioCppTextToSpeech(io.ComfyNode):
 
         # DynamicCombo 的 dict 形态: {'model': '<id>', '<option 参数名>': 值}
         # option 参数(排除顶层字段)放进 options 对象,自动适配新家族。
-        # 空值/数值 0/负 seed 不传:服务器对 min≥1 的参数(如 text_chunk_size)
-        # 传 0 会 500,对 guidance_scale 等要求正数的参数传 0.0 会 500
-        # ("must be positive");不传则服务器用内置默认。
+        # language 现在也是 option(家族相关),一并取出。
         p = {k: v for k, v in model.items() if k in params and k not in TOP_LEVEL_FIELDS}
         extra_options = {
             k: v for k, v in p.items() if is_meaningful_option_value(k, v)
         }
+        # language 从 model dict 里取(每个家族自己的下拉)
+        language = model.get("language", "")
 
         # ---- 必填输入预校验(避免服务器晦涩 500) ----
         # qwen3_tts_base 是克隆模型,必须提供参考音频(voice_ref)才能合成;
