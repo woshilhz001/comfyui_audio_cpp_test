@@ -1,9 +1,8 @@
-"""Conversion between raw WAV bytes and ComfyUI's native AUDIO dict.
+"""WAV 原始字节与 ComfyUI 原生 AUDIO 字典之间的转换。
 
-ComfyUI represents audio as {'waveform': torch.Tensor float32 [B, C, T],
-'sample_rate': int}. This module owns that conversion and the encoding of a
-waveform back to WAV bytes for upload, plus a small tolerance for the legacy
-{'audio': np.ndarray [T, C]} shape some packs still emit.
+ComfyUI 用 {'waveform': torch.Tensor float32 [B, C, T], 'sample_rate': int}
+表示音频。本模块负责该转换、把波形编码回 WAV 字节用于上传,
+并兼容旧式 {'audio': np.ndarray [T, C]} 形状(部分旧节点包仍会输出)。
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from .audio_cpp_client import AudioCppError
 
 
 def wav_bytes_to_audio_dict(wav_bytes: bytes) -> dict[str, Any]:
-    """Decode WAV bytes into {'waveform': [B, C, T] float32, 'sample_rate': int}."""
+    """把 WAV 字节解码为 {'waveform': [B, C, T] float32, 'sample_rate': int}。"""
     with sf.SoundFile(io.BytesIO(wav_bytes)) as audio_file:
         sample_rate = int(audio_file.samplerate)
         data = audio_file.read(dtype="float32", always_2d=True)
@@ -51,7 +50,7 @@ def resample_waveform(waveform: torch.Tensor, src_rate: int, dst_rate: int) -> t
 
 
 def audio_dict_to_wav_bytes(audio: dict[str, Any]) -> bytes:
-    """Encode a ComfyUI audio dict to WAV bytes (PCM_16)."""
+    """把 ComfyUI 音频字典编码为 WAV 字节(PCM_16)。"""
     if "audio" in audio and isinstance(audio["audio"], np.ndarray):
         samples = np.ascontiguousarray(audio["audio"])
         sample_rate = int(audio.get("sample_rate", audio.get("sr", 0)))

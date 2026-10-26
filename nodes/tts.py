@@ -20,6 +20,7 @@ from ..audio_cpp_client import (
     _stage_audio,
     build_base_url,
     check_server,
+    is_meaningful_option_value,
     speech_synthesize,
 )
 from ..audio_codec import audio_dict_to_wav_bytes, wav_bytes_to_audio_dict
@@ -30,13 +31,20 @@ from ..model_profiles import all_family_options, spec_languages
 # DynamicCombo option 里排除,放到节点顶层的字段(类型不放进下拉)。
 # reference_text 必须在内:否则它会同时出现在顶层面和 DynamicCombo 下拉里,
 # 造成 qwen3_tts_base 等家族出现两个 reference_text 输入的界面 bug。
-TOP_LEVEL_FIELDS = {"voice_ref", "reference_text", "language", "seed", "instructions"}
+# voice 同样由顶层输入承接(qwen3_tts_customvoice 等内置音色下拉),避免重复。
+TOP_LEVEL_FIELDS = {"voice_ref", "reference_text", "language", "seed", "instructions", "voice"}
 
 
 def _input_for(param_id: str, spec):
-    """把 (类型, 中文提示, 默认/选项) 转成 io 输入。类型严格对齐 audio.cpp API。"""
+    """把 (类型, 中文提示, 默认/选项) 转成 io 输入。类型严格对齐 audio.cpp API。
+
+    显示名/提示优先查 param_labels 中文翻译表(按稳定参数名匹配);
+    spec 新增参数未命中时回退参数 id + 官方英文 description,不报错。
+    """
     kind, tooltip, default = spec
-    kwargs = dict(id=param_id, tooltip=tooltip)
+    from ..param_labels import get_label
+    display, tip = get_label(param_id, tooltip)
+    kwargs = dict(id=param_id, display_name=display, tooltip=tip)
     if kind == "string":
         return io.String.Input(default=default, **kwargs)
     if kind == "int":
@@ -74,10 +82,42 @@ def _tts_options():
                 inputs.append(inp)
         if not inputs:
             # 空下拉族:补通用 seed,保证下拉有选项可选。
-            inputs.append(io.Int.Input("seed", display_name="seed", default=-1, min=-1,
+            inputs.append(io.Int.Input("seed", display_name="随机种子", default=-1, min=-1,
                                        tooltip="随机种子,-1 由服务器决定,不传该参数。"))
         options.append(io.DynamicCombo.Option(family, inputs))
     return options
+
+
+def _static_voices() -> list[str]:
+    """服务器离线时的内置音色兜底列表(常见 Qwen3-CustomVoice 音色 id)。"""
+    return ["Vivian", "Ryan", "Vivian_en", "Ryan_en", "serena", "eric", "andre"]
+
+
+def _voice_options() -> list[str]:
+    """voice 下拉选项:服务器在线时从 /v1/audio/voices 拉取内置音色,
+    离线/失败退回静态兜底列表。
+
+    选项构建带短超时(5s),不阻塞节点面板加载;服务器未启动时静默降级。
+    执行期非列表值原样透传(保留自由输入能力,兼容自定义音色路径)。
+    首项为空字符串("")表示「不指定内置音色」(克隆模型用参考音频)。
+    """
+    static = _static_voices()
+    try:
+        from ..audio_cpp_client import list_voices
+        from ..config import LIST_TIMEOUT
+
+        server_voices = list_voices(build_base_url(DEFAULT_HOST, DEFAULT_PORT),
+                                    timeout=float(min(LIST_TIMEOUT, 5.0)))
+        if server_voices:
+            # 服务器音色在前(实际可用),静态兜底去重追加在后(兼容旧 workflow 值)
+            merged = list(server_voices)
+            for v in static:
+                if v not in merged:
+                    merged.append(v)
+            return [""] + merged
+    except Exception:
+        pass
+    return [""] + static
 
 
 def _language_options() -> list[str]:
@@ -86,6 +126,7 @@ def _language_options() -> list[str]:
     - 数据源:各家族 model_specs languages 的并集;
     - 额外固定写入常见语言代码与旧 workflow 兼容别名(中文显示名等),
       保证已有工作流里的 language 值不会因下拉校验失败而整图被拒。
+    - 首项为空字符串("")表示「自动/不指定」,与 default="" 对齐。
     """
     # 固定选项:常见语言代码 + 旧工作流的兼容值(历史 STRING 输入留下的)
     fixed = [
@@ -98,8 +139,8 @@ def _language_options() -> list[str]:
     langs = set(fixed)
     for family in all_family_options("tts"):
         langs.update(spec_languages(family))
-    # 保持 fixed 的顺序,spec 补充的语言追加在后
-    return fixed + sorted(langs - set(fixed))
+    # 保持 fixed 的顺序,spec 补充的语言追加在后;首项为空字符串(自动)
+    return [""] + fixed + sorted(langs - set(fixed))
 
 
 class AudioCppTextToSpeech(io.ComfyNode):
@@ -127,13 +168,14 @@ class AudioCppTextToSpeech(io.ComfyNode):
             inputs=[
                 io.String.Input(
                     "text",
-                    display_name="text",
+                    display_name="文本",
                     multiline=True,
                     default="",
                     tooltip="要合成的文本内容。",
                 ),
                 io.DynamicCombo.Input(
                     "model",
+                    display_name="模型",
                     options=_tts_options(),
                     tooltip="TTS 模型族。选择后只显示该模型需要的参数。",
                 ),
@@ -149,32 +191,37 @@ class AudioCppTextToSpeech(io.ComfyNode):
                 ),
                 io.String.Input(
                     "reference_text",
-                    display_name="reference_text",
+                    display_name="参考文本",
                     default="",
                     tooltip="参考音频(voice_ref)对应的文本转写,克隆模型要求。",
                 ),
                 io.String.Input(
                     "instructions",
-                    display_name="instructions",
+                    display_name="音色设计描述",
                     default="",
                     tooltip="音色设计描述(VoiceDesign 模型 qwen3_tts 需要),如「温暖的中年播音员」。",
                 ),
-                io.String.Input(
+                io.Combo.Input(
                     "voice",
-                    display_name="voice",
+                    display_name="内置音色",
+                    options=_voice_options(),
                     default="",
-                    tooltip="内置音色 id(如 qwen3_tts_customvoice 的 Vivian、Ryan)。",
+                    tooltip=(
+                        "内置音色 id(如 qwen3_tts_customvoice 的 Vivian、Ryan)。\n"
+                        "下拉选项来自服务器 /v1/audio/voices(在线时)或内置兜底列表;\n"
+                        "留空则不传该参数(克隆模型用参考音频);非列表值(如自定义音色路径)执行时原样透传给服务器。"
+                    ),
                 ),
                 io.Combo.Input(
                     "language",
-                    display_name="language",
+                    display_name="语言",
                     options=_language_options(),
-                    default="english",
-                    tooltip="语言代码(来自 audio.cpp 各家族的 languages)。auto 表示自动。",
+                    default="",
+                    tooltip="语言代码(来自 audio.cpp 各家族的 languages)。留空或 auto 表示自动。",
                 ),
                 io.Int.Input(
                     "seed",
-                    display_name="seed",
+                    display_name="随机种子",
                     default=-1,
                     min=-1,
                     control_after_generate=io.ControlAfterGenerate.randomize,
@@ -190,15 +237,25 @@ class AudioCppTextToSpeech(io.ComfyNode):
                         "适合生成完就要让出显存的场景;留 False 则模型保留在内存复用。"
                     ),
                 ),
+                io.Boolean.Input(
+                    "auto_register",
+                    display_name="自动注册未注册模型",
+                    default=True,
+                    tooltip=(
+                        "执行前检查服务器注册表,若该模型尚未注册则自动调\n"
+                        "POST /v1/models/load 补注册(需服务器开 --ui-management)。\n"
+                        "已注册的模型不受影响(幂等)。"
+                    ),
+                ),
                 io.String.Input(
                     "host",
-                    display_name="host",
+                    display_name="服务器地址",
                     default=DEFAULT_HOST,
                     tooltip="audio.cpp 服务器地址(默认 127.0.0.1)。",
                 ),
                 io.Int.Input(
                     "port",
-                    display_name="port",
+                    display_name="端口",
                     default=DEFAULT_PORT,
                     min=1,
                     max=65535,
@@ -206,7 +263,7 @@ class AudioCppTextToSpeech(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "timeout_seconds",
-                    display_name="timeout_seconds",
+                    display_name="超时时间(秒)",
                     default=600.0,
                     min=1.0,
                     max=3600.0,
@@ -238,6 +295,7 @@ class AudioCppTextToSpeech(io.ComfyNode):
         language: str = "english",
         seed: int = -1,
         unload_after_execute: bool = False,
+        auto_register: bool = True,
     ) -> io.NodeOutput:
         if not text:
             raise AudioCppError("文本转语音需要非空的「text」输入。")
@@ -254,8 +312,13 @@ class AudioCppTextToSpeech(io.ComfyNode):
 
         # DynamicCombo 的 dict 形态: {'model': '<id>', '<option 参数名>': 值}
         # option 参数(排除顶层字段)放进 options 对象,自动适配新家族。
+        # 空值/数值 0/负 seed 不传:服务器对 min≥1 的参数(如 text_chunk_size)
+        # 传 0 会 500,对 guidance_scale 等要求正数的参数传 0.0 会 500
+        # ("must be positive");不传则服务器用内置默认。
         p = {k: v for k, v in model.items() if k in params and k not in TOP_LEVEL_FIELDS}
-        extra_options = {k: v for k, v in p.items() if v not in ("", None)}
+        extra_options = {
+            k: v for k, v in p.items() if is_meaningful_option_value(k, v)
+        }
 
         # ---- 必填输入预校验(避免服务器晦涩 500) ----
         # qwen3_tts_base 是克隆模型,必须提供参考音频(voice_ref)才能合成;
@@ -275,6 +338,20 @@ class AudioCppTextToSpeech(io.ComfyNode):
 
         base_url = build_base_url(host, port)
         check_server(base_url)  # 区分「服务器未启动」与「请求失败」
+
+        # 自动注册:audio.cpp 的注册表与模型文件解耦,新下载/放入 models/ 的
+        # 模型首次请求会 500 "unknown model id"。这里运行时补注册(幂等:
+        # 已注册的直接返回,不占额外时间),失败给中文指引。
+        if auto_register:
+            from ..interruptible import run_interruptible, to_interruptible
+            from ..audio_cpp_client import ensure_model_registered
+
+            await run_interruptible(
+                to_interruptible(ensure_model_registered)(
+                    base_url, family, timeout=float(timeout_seconds)
+                ),
+                base_url=base_url,
+            )
 
         # 语言归一化:兼容旧 workflow 的中文显示名,映射回 audio.cpp 语言代码。
         # 注意 qwen3_tts 系列接受完整语言词(english/chinese),不接受 en/zh。

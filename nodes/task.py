@@ -35,21 +35,40 @@ from ..audio_cpp_client import (
     _stage_audio,
     build_base_url,
     check_server,
+    is_meaningful_option_value,
     task_run,
 )
 from ..audio_codec import audio_dict_to_wav_bytes, resample_waveform
 from ..config import DEFAULT_HOST, DEFAULT_PORT
+from .. import model_contracts
+from ..model_contracts import family_required_inputs, family_lifts
 from ..model_profiles import all_family_options
 
 
-# DynamicCombo option 里排除的字段(顶层类型承接,不放进下拉)。
-TASK_TOP_LEVEL_FIELDS = {"voice_ref", "target_voice", "language"}
+# DynamicCombo option 里排除的字段(顶层类型承接或提升到节点顶层,不放进下拉)。
+# 语义见 model_contracts.py:TASK_HIDDEN_FIELDS / TASK_LIFTS。
+TASK_TOP_LEVEL_FIELDS = (
+    model_contracts.TASK_HIDDEN_FIELDS | {"voice_ref", "target_voice", "language"}
+)
+
+# 家族 -> 顶层 AUDIO 输入在 /v1/tasks/run 请求体里使用的字段名。
+# 默认 voice_ref;vevo2 的新版 spec 要求 target_voice(顶层字段会被服务器
+# 映射进 options.target_voice,见 app/cli/request.cpp build_request_from_json)。
+SERVER_AUDIO_FIELD = {
+    "vevo2": "target_voice",
+}
 
 
 def _input_for(param_id: str, spec):
-    """把 (类型, 中文提示, 默认/选项) 转成 io 输入,类型对齐 audio.cpp API。"""
+    """把 (类型, 中文提示, 默认/选项) 转成 io 输入,类型对齐 audio.cpp API。
+
+    显示名/提示优先查 param_labels 中文翻译表(按稳定参数名匹配);
+    spec 新增参数未命中时回退参数 id + 官方英文 description,不报错。
+    """
     kind, tooltip, default = spec
-    kwargs = dict(id=param_id, tooltip=tooltip)
+    from ..param_labels import get_label
+    display, tip = get_label(param_id, tooltip)
+    kwargs = dict(id=param_id, display_name=display, tooltip=tip)
     if kind == "string":
         return io.String.Input(default=default, **kwargs)
     if kind == "path":
@@ -74,21 +93,22 @@ def _task_options():
     """为每个音频任务模型族构建 DynamicCombo.Option(参数只列该族真实需要的)。
 
     参数来源 = 手工档案(TASK_PROFILES)+ 自动发现的 model_specs 新家族。
-    audio.cpp 新增任务模型(如 yue2 音乐、sheetsage2 MIDI)后自动出现。
-    voice_ref/language 等顶层字段不出现在下拉里。
+    audio.cpp 新增任务模型(如 yue2 音乐、sheetsage2 MIDI、rvc 转换)后自动出现。
+    voice_ref/language/style/lyrics 等顶层字段不出现在下拉里。
     """
     options = []
     for family, params in all_family_options("task").items():
+        lifts = family_lifts(family)
         inputs = []
         for name, spec in params.items():
-            if name in TASK_TOP_LEVEL_FIELDS:
+            if name in TASK_TOP_LEVEL_FIELDS or name in lifts:
                 continue
             inp = _input_for(name, spec)
             if inp is not None:
                 inputs.append(inp)
         if not inputs:
             # 空下拉族(spec 无参数):补通用 seed,保证下拉有选项可选。
-            inputs.append(io.Int.Input("seed", display_name="seed", default=-1, min=-1,
+            inputs.append(io.Int.Input("seed", display_name="随机种子", default=-1, min=-1,
                                        tooltip="随机种子,-1 由服务器决定,不传该参数。"))
         options.append(io.DynamicCombo.Option(family, inputs))
     return options
@@ -121,30 +141,39 @@ class AudioCppAudioTask(io.ComfyNode):
             category="audio.cpp",
             description=(
                 "调用 audio.cpp 通用任务端点(/v1/tasks/run),覆盖:\n"
-                "- seed_vc            声音转换(VC)  :源音频 + 目标参考声音\n"
-                "- sortformer_diar    说话人分离(DIAR):检测说话人个数与区间\n"
-                "- mel_band_roformer  音源分离(SEP)  :人声/伴奏\n"
-                "- minimax_music3     音乐生成(GEN)  :歌词 + 时长\n"
-                "- muscriptor_small   MIDI 生成      :输出乐谱\n\n"
+                "- yue2 / heartmula / minimax_music3   音乐生成(歌词/风格)\n"
+                "- sheetsage2 / muscriptor_small      乐谱转写(音频→ABC/MIDI)\n"
+                "- seed_vc / rvc / meanvc2            声音转换\n"
+                "- mel_band_roformer / audiosr        音源分离 / 超分辨率\n"
+                "- sortformer_diar                    说话人分离\n"
+                "- controlfoley                       音效生成\n\n"
                 "「模型」下拉是动态的:选择模型族后只显示该模型真实需要的参数。\n"
                 "输入音频(AUDIO)会自动上传到服务器临时目录(需要 server 以\n"
-                "--ui 或 --ui-management 启动)。\n\n"
+                "--ui 或 --ui-management 启动)。音乐家族的歌词/风格提升到\n"
+                "节点顶层的 text / style 输入。\n\n"
                 "输出:主音频(可选)、文本(可选)、完整结果 JSON(诊断/多路音频)。"
             ),
-            search_aliases=["音频任务", "声音转换", "音源分离", "说话人分离", "音乐生成", "midi"],
+            search_aliases=["音频任务", "声音转换", "音源分离", "说话人分离", "音乐生成", "midi", "乐谱", "音效", "超分辨率"],
             inputs=[
                 io.Audio.Input(
                     "audio",
-                    display_name="audio",
+                    display_name="源音频",
                     optional=True,
                     tooltip="源音频(VC/分离/说话人分离需要;音乐生成、MIDI 可留空)。",
                 ),
                 io.String.Input(
                     "text",
-                    display_name="text",
+                    display_name="文本(歌词/说明)",
                     multiline=True,
                     default="",
                     tooltip="文本输入:音乐生成填歌词,MIDI 生成填说明。",
+                ),
+                io.String.Input(
+                    "style",
+                    display_name="风格",
+                    multiline=True,
+                    default="",
+                    tooltip="风格/标签文本(如 yue2 的歌曲风格 rock、ballad)。音乐模型专用,其他模型忽略。",
                 ),
                 io.Audio.Input(
                     "voice_ref",
@@ -157,18 +186,19 @@ class AudioCppAudioTask(io.ComfyNode):
                 ),
                 io.DynamicCombo.Input(
                     "model",
+                    display_name="模型",
                     options=_task_options(),
                     tooltip="音频任务模型族。选择后只显示该模型需要的参数。",
                 ),
                 io.String.Input(
                     "host",
-                    display_name="host",
+                    display_name="服务器地址",
                     default=DEFAULT_HOST,
                     tooltip="audio.cpp 服务器地址(默认 127.0.0.1)。",
                 ),
                 io.Int.Input(
                     "port",
-                    display_name="port",
+                    display_name="端口",
                     default=DEFAULT_PORT,
                     min=1,
                     max=65535,
@@ -176,7 +206,7 @@ class AudioCppAudioTask(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "timeout_seconds",
-                    display_name="timeout_seconds",
+                    display_name="超时时间(秒)",
                     default=600.0,
                     min=1.0,
                     max=3600.0,
@@ -185,7 +215,7 @@ class AudioCppAudioTask(io.ComfyNode):
                 ),
                 io.Int.Input(
                     "target_sample_rate",
-                    display_name="target_sample_rate",
+                    display_name="目标采样率",
                     default=0,
                     min=0,
                     max=192000,
@@ -233,6 +263,7 @@ class AudioCppAudioTask(io.ComfyNode):
         timeout_seconds: float,
         audio: Input.Audio = None,
         text: str = "",
+        style: str = "",
         voice_ref: Input.Audio = None,
         target_sample_rate: int = 0,
         unload_after_execute: bool = False,
@@ -246,41 +277,57 @@ class AudioCppAudioTask(io.ComfyNode):
                 f"未知音频任务模型族: {family}。该模型未在 model_specs/ 或本节点档案中定义。"
             )
         # DynamicCombo 的 dict: {'model': '<id>', '<option 参数名>': 值}
-        # option 参数(顶层字段除外)进 options 对象,自动适配新家族。
+        # option 参数(顶层字段 + 提升到顶层的 style/lyrics 除外)进 options
+        # 对象,自动适配新家族。与 _task_options 的隐藏规则保持一致。
         params = all_options[family]
-        option_names = {k for k, v in params.items() if k not in TASK_TOP_LEVEL_FIELDS}
-        # seed < 0(默认 -1,表示由服务器随机)不传:直接传负值会被服务器
-        # 以 "seed must be an unsigned integer" 拒绝(HTTP 500)。
+        lifts = family_lifts(family)
+        option_names = {
+            k for k, v in params.items()
+            if k not in TASK_TOP_LEVEL_FIELDS and k not in lifts
+        }
+        # 空值/数值 0/负 seed 不传:服务器对 min≥1 的参数(如 text_chunk_size,
+        # min_speech_duration_ms)传 0 会 500;对 guidance_scale 等要求正数的
+        # 参数传 0.0 会 500("must be positive");负 seed 会被
+        # "seed must be an unsigned integer" 拒绝。不传则服务器用内置默认。
         options = {
             k: v for k, v in model.items()
-            if k in option_names and v not in ("", None)
-            and not (k == "seed" and isinstance(v, int) and v < 0)
+            if k in option_names and is_meaningful_option_value(k, v)
         }
 
         # ---- 必填输入预校验(在请求服务器前给出明确错误,避免 500 晦涩报错) ----
-        # 每个任务族的输入契约,来自 audio.cpp 源码(src/models/*/session.cpp):
-        #   seed_vc     : 源音频(audio)+ 目标说话人参考音频(voice_ref)都必需;
-        #   sortformer  : 源音频必需;
-        #   minimax_music3 / muscriptor_small: 文本/歌词必需。
-        needs_audio = {"seed_vc", "sortformer_diar", "mel_band_roformer"}
-        needs_ref = {"seed_vc"}
-        needs_text = {"minimax_music3", "muscriptor_small"}
-        if family in needs_audio and audio is None:
+        # 输入契约来自 model_contracts.TASK_INPUT_REQS(audio.cpp 源码
+        # src/models/*/session.cpp 提炼):text / audio / voice_ref 三选若干。
+        required = family_required_inputs(family)
+        if "audio" in required and audio is None:
             raise AudioCppError(
                 f"{family}:该任务必须有「源音频(audio)」输入。"
                 "请把要处理的音频连接到本节点的 audio 端口。"
             )
-        if family in needs_ref and voice_ref is None:
+        if "voice_ref" in required and voice_ref is None:
             raise AudioCppError(
                 f"{family}:该任务必须有「参考音频(voice_ref)」输入(目标说话人声音)。"
                 "audio.cpp 的 Seed-VC 需要 target speaker reference audio;\n"
                 "请把目标说话人的一段音频连接到本节点的「参考音频」端口。"
             )
-        if family in needs_text and not text:
+        if "text" in required and not text.strip():
             raise AudioCppError(
                 f"{family}:该任务必须有「文本(text)」输入(歌词/说明)。"
                 "请在 text 输入中填写要生成的歌词或说明。"
             )
+        if "style" in required and not style.strip():
+            raise AudioCppError(
+                f"{family}:该任务必须有「风格(style)」输入(音乐风格描述)。"
+                "请在 style 输入中填写风格,例如 rock、ballad、jpop。"
+            )
+
+        # ---- 提升到顶层的参数回填(options.lyrics / options.style) ----
+        # 音乐家族(yue2/heartmula/minimax_music3)在顶层面板填写歌词/风格,
+        # 执行时回填进 options —— 与 model_specs 的契约一致(options 优先于
+        # text_input),且不会把空值传给服务器。
+        for lift in family_lifts(family):
+            lifted = model_contracts.lifted_value(lift, text, style)
+            if lifted:
+                options[lift] = lifted
 
         base_url = build_base_url(host, port)
         check_server(base_url)
@@ -315,6 +362,7 @@ class AudioCppAudioTask(io.ComfyNode):
                     text=text or None,
                     audio_wav=wav_bytes,
                     voice_ref_path=voice_ref_path,
+                    voice_ref_field=SERVER_AUDIO_FIELD.get(family, "voice_ref"),
                     options=options or None,
                     timeout=float(timeout_seconds),
                 ),

@@ -1,4 +1,4 @@
-"""ComfyUI extension registration for audio.cpp custom nodes."""
+"""audio.cpp 自定义节点的 ComfyUI 扩展注册入口。"""
 
 from typing_extensions import override
 

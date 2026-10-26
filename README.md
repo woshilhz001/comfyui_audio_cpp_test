@@ -75,6 +75,8 @@ Qwen3 系列用法:
 调用 `POST /v1/audio/transcriptions`(multipart)。输入 `AUDIO`,`language`
 为下拉(auto / 具体语言),`prompt` 可选。输出 3 项:
 转写文本(STRING)、语言(STRING)、完整结果 JSON(STRING,含 timing)。
+模型下拉自动发现 spec 家族(qwen3_asr / sense_asr / moonshine_asr /
+canary_asr / cohere_asr / confucius4_r2t2 / moss_transcribe_diarize 等)。
 
 ### AudioCpp 音频任务 (AudioCppAudioTask)
 
@@ -82,16 +84,32 @@ Qwen3 系列用法:
 
 | 模型族 | 任务 | 说明 |
 | --- | --- | --- |
+| `yue2` | 音乐生成(YuE2) | 歌词 + 风格 + 可选 ABC 乐谱规划(coT);必备「text(歌词)」,style 提升到顶层 |
+| `heartmula` | 音乐生成(HeartMuLa) | 歌词驱动生成,可开 infinite_mode 生成长音频 |
+| `minimax_music3` | 音乐生成 | 歌词 + 时长 |
+| `midashenglm_gen` | 音乐生成(MiDaShengLM) | 时长/引导强度/停止阈值 |
+| `sheetsage2` | 乐谱转写 | 输入音频 → ABC 乐谱文本(输出 text/artifacts) |
+| `muscriptor_small` | MIDI 生成 | 输入音频 → MIDI/JSON 乐谱 |
 | `seed_vc` | 声音转换(VC) | 源音频 + 参考音频(目标声音,接 voice_ref);`route` 选项:`v2_vc`(声音转换,默认)/ `v1_svc`(唱歌)/ `v1_whisper_bigvgan_vc` / `v1_xlsr_hift_vc`;Seed-VC **不需要参考文本** |
+| `rvc` | 声音转换(RVC) | 内置音色或自备 `.pth` 检查点,支持半音移调/检索/消音保护 |
+| `meanvc2` | 声音转换(MeanVC2) | 轻量转换,多说话人 id |
+| `ace_step` | 音频编辑 / AI 歌曲生成 | 源音频 + 提示词 |
 | `sortformer_diar` | 说话人分离 | 检测说话人个数与区间(输出 speaker_turns) |
 | `mel_band_roformer` | 音源分离 | 人声/伴奏 |
-| `minimax_music3` | 音乐生成 | 歌词 + 时长 |
-| `muscriptor_small` | MIDI 生成 | 输出乐谱 |
+| `audiosr` | 音频超分辨率 | 建议接 16 kHz 输入,输出高分辨率版本 |
+| `universr` | 通用音频超分辨率 | 单模型多采样率(8k~44.1k),输入采样率可配置 |
+| `controlfoley` | 音效生成 | 文本提示 + 可选视频条件 |
+| `liveavatar` | 人像动画生成 | 参考人像图片 + 提示词 → 动态视频 |
+| `pulsevad` | 语音活动检测 | 检测语音/静音区间(阈值/最短时长可调) |
+| `apollo` | 流式音频处理 | 分块流式处理(分块时长/重叠可调) |
 
 - 输入音频与参考音频(`voice_ref`)均为 **AUDIO 连接**,自动上传;
   `target_sample_rate` 可在输入采样率与模型要求不一致时重采样
   (如 sortformer_diar 需 16000)。
-- 输出:主音频(AUDIO,可选)、文本(STRING,可选)、完整结果 JSON(STRING)。
+- 音乐家族(yue2 / heartmula / minimax_music3)的**歌词/风格提升到顶层
+  `text` / `style` 输入**,执行时自动回填进 options —— 与 audio.cpp 契约一致
+  (options.lyrics 优先于 text_input)。契约定义见 `model_contracts.py`。
+- 输出:主音频(AUDIO,可选)、文本(STRING,MIDI/ABC 乐谱等)、完整结果 JSON(STRING)。
 
 ### AudioCpp 卸载模型(释放显存) (AudioCppUnloadModels)
 
@@ -117,6 +135,7 @@ comfyui_audio.cpp_test/
 ├── audio_codec.py         # WAV ↔ AUDIO 互转 + 重采样(不依赖 ComfyUI)
 ├── interruptible.py       # 可中断请求助手:响应 ComfyUI 停止按钮 + 中断自动卸载
 ├── model_profiles.py      # 模型族参数档案:DynamicCombo 的数据来源
+├── model_contracts.py     # 模型请求契约:端点/必需输入/顶层提升/隐藏字段
 └── nodes/
     ├── __init__.py
     ├── base.py            # 共享输入模板
@@ -129,6 +148,8 @@ comfyui_audio.cpp_test/
 
 **扩展新模型**:在 `model_profiles.py` 的对应档案(或新增档案类)
 追加模型族与参数定义,节点即自动获得该模型的下拉选项——无需改节点代码。
+需要特殊输入契约(必需音频/歌词、style/lyrics 提升到顶层)的家族,
+在 `model_contracts.py` 的 `TASK_INPUT_REQS` / `TASK_LIFTS` 补一行即可。
 
 ## 新模型自动适配(面向未来的扩展接口)
 
@@ -140,14 +161,20 @@ audio.cpp 与 GitHub 上游持续新增模型(如 `yue2` 音乐生成、`sheetsa
 2. **运行时自动发现**(`model_profiles.py` 的 `ModelSpecLoader`):
    - 启动时扫描 `config.py` 中 `MODEL_SPEC_DIRS` 列出的目录
      (源码目录 `audio.cpp/audio.cpp/model_specs` 优先,其次是程序目录);
-   - 新家族只要带 spec,就**自动出现在 TTS / 音频任务节点的下拉里**;
+   - 新家族只要带 spec,就**自动出现在 TTS / ASR / 音频任务节点的下拉里**;
    - 参数类型按 audio.cpp API 精确映射:
      `string/enum → STRING/COMBO`、`int → INT`、`float → FLOAT`、
-     `bool → BOOLEAN`、`path → STRING(服务器路径)`。
+     `bool → BOOLEAN`、`path → STRING(服务器路径)`;
+   - 手工档案里已有同族模型时(如 muscriptor_small ← spec family muscriptor),
+     自动发现的 family 版会被跳过,避免同一模型在下拉出现两份。
 3. **手工档案覆盖**:`model_profiles.py` 里的 `TTS_PROFILES` / `TASK_PROFILES`
    优先于自动发现,用于补充中文提示、合理默认值,以及 spec 参数缺失的
    旧格式家族(如 qwen3_tts 系列内嵌于 GGUF)。
-4. **扩展零成本**:audio.cpp 升级新增模型后,只需重启 ComfyUI(或重新加载
+4. **请求契约层**(`model_contracts.py`):与「下拉长什么样」分离,
+   `TASK_INPUT_REQS` 声明必需输入(audio / voice_ref / text)、
+   `TASK_LIFTS` 声明哪些参数提升到节点顶层并回填进 options(如 yue2 的
+   style/lyrics)。新增家族通常无需改动;特殊家族在契约表补一行即可。
+5. **扩展零成本**:audio.cpp 升级新增模型后,只需重启 ComfyUI(或重新加载
    扩展),新模型即自动可用——**无需修改任何节点代码**。
 
 ### 新增模型的手动作业(仅在需要时)
@@ -175,5 +202,9 @@ TASK_PROFILES["mi_model"] = (
     (源码只接受 VoiceDesign task;配置成 `tts` 会报
     "Qwen3 voice design model only supports the VoiceDesign task");
   - `qwen3_tts_base` / `qwen3_tts_customvoice` 用 `task: "tts"`;
+- **新模型(YuE2 / SheetSage2 / RVC / HeartMuLa / AudioSR 等)接入**:
+  把它们写进 `server.json` 的 `models` 数组(`id` / `family` / `path` /
+  `task` 四字段,`task` 取 spec 里的任务类别,如 `music` / `midi` / `vc` /
+  `s2s` / `sfx`),再重启服务器;节点下拉会自动发现并显示——无需改节点包。
 - 其余字段维持官方格式(`load_options` / `session_options` /
   `lazy_load` / `busy_timeout_ms` 等),服务器可直接解析。

@@ -38,13 +38,13 @@ def server_inputs():
     return [
         io.String.Input(
             "host",
-            display_name="host",
+            display_name="服务器地址",
             default=config.DEFAULT_HOST,
             tooltip="audio.cpp 服务器地址(默认 127.0.0.1)。",
         ),
         io.Int.Input(
             "port",
-            display_name="port",
+            display_name="端口",
             default=config.DEFAULT_PORT,
             min=1,
             max=65535,
@@ -75,7 +75,7 @@ class AudioCppUnloadModels(io.ComfyNode):
             inputs=[
                 io.String.Input(
                     "trigger",
-                    display_name="trigger(连接即执行)",
+                    display_name="触发(连接即执行)",
                     optional=True,
                     default="",
                     tooltip=(
@@ -85,7 +85,7 @@ class AudioCppUnloadModels(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "mode",
-                    display_name="mode",
+                    display_name="卸载模式",
                     options=UNLOAD_MODES,
                     default="check_only",
                     tooltip=(

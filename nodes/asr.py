@@ -18,6 +18,18 @@ from comfy_api.latest import Input, io
 from ..audio_cpp_client import AudioCppError, build_base_url, check_server, transcribe
 from ..audio_codec import audio_dict_to_wav_bytes
 from ..config import DEFAULT_HOST, DEFAULT_PORT
+from ..model_profiles import all_family_options
+
+
+def _asr_model_options() -> list[str]:
+    """ASR 模型下拉:手工档案(qwen3_asr)+ 自动发现的 spec ASR 家族。
+
+    注意:transcriptions 端点的 multipart 表单只接受 file/model/language/prompt
+    字段,家族专属参数(options)无法经 multipart 传入;因此这里只提供「模型 id
+    选择」,不展示各家族的参数下拉。
+    """
+    families = list(all_family_options("asr").keys())
+    return families if families else ["qwen3_asr"]
 
 
 class AudioCppSpeechToText(io.ComfyNode):
@@ -30,7 +42,8 @@ class AudioCppSpeechToText(io.ComfyNode):
             display_name="AudioCpp 语音转文本",
             category="audio.cpp",
             description=(
-                "把 AUDIO 输入发送给 audio.cpp 服务器的 ASR 模型(如 qwen3_asr),\n"
+                "把 AUDIO 输入发送给 audio.cpp 服务器的 ASR 模型\n"
+                "(如 qwen3_asr、sense_asr、moonshine_asr 等),\n"
                 "返回转写文本。上传前会把波形在本地编码为 WAV(multipart file 字段),\n"
                 "这是服务器端唯一保证支持的输入格式。\n\n"
                 "需要本地已启动 audiocpp_server(默认 http://127.0.0.1:8085)。\n"
@@ -40,25 +53,25 @@ class AudioCppSpeechToText(io.ComfyNode):
             inputs=[
                 io.Audio.Input(
                     "audio",
-                    display_name="audio",
+                    display_name="音频",
                     tooltip="要转写的音频(waveform [B,C,T])。",
                 ),
                 io.Combo.Input(
                     "model",
-                    display_name="model",
-                    options=["qwen3_asr"],
+                    display_name="模型",
+                    options=_asr_model_options(),
                     default="qwen3_asr",
-                    tooltip="ASR 模型 id。",
+                    tooltip="ASR 模型 id(来自 server.json 配置,自动发现 spec 家族)。",
                 ),
                 io.String.Input(
                     "host",
-                    display_name="host",
+                    display_name="服务器地址",
                     default=DEFAULT_HOST,
                     tooltip="audio.cpp 服务器地址(默认 127.0.0.1)。",
                 ),
                 io.Int.Input(
                     "port",
-                    display_name="port",
+                    display_name="端口",
                     default=DEFAULT_PORT,
                     min=1,
                     max=65535,
@@ -66,7 +79,7 @@ class AudioCppSpeechToText(io.ComfyNode):
                 ),
                 io.Combo.Input(
                     "language",
-                    display_name="language",
+                    display_name="语言",
                     options=["auto", "zh", "en", "yue", "ja", "ko", "de", "fr", "es", "zh dialects"],
                     default="auto",
                     tooltip=(
@@ -76,13 +89,13 @@ class AudioCppSpeechToText(io.ComfyNode):
                 ),
                 io.String.Input(
                     "prompt",
-                    display_name="prompt",
+                    display_name="引导提示",
                     default="",
                     tooltip="可选的引导提示文本(热词、专有名词、上下文等)。",
                 ),
                 io.Float.Input(
                     "timeout_seconds",
-                    display_name="timeout_seconds",
+                    display_name="超时时间(秒)",
                     default=600.0,
                     min=1.0,
                     max=3600.0,
@@ -96,6 +109,16 @@ class AudioCppSpeechToText(io.ComfyNode):
                     tooltip=(
                         "转写完成后自动调用 /v1/tasks/unload_all_models,\n"
                         "释放 audio.cpp 模型占用的显存/内存。"
+                    ),
+                ),
+                io.Boolean.Input(
+                    "auto_register",
+                    display_name="自动注册未注册模型",
+                    default=True,
+                    tooltip=(
+                        "执行前检查服务器注册表,若该模型尚未注册则自动调\n"
+                        "POST /v1/models/load 补注册(需服务器开 --ui-management)。\n"
+                        "已注册的模型不受影响(幂等)。"
                     ),
                 ),
             ],
@@ -129,6 +152,7 @@ class AudioCppSpeechToText(io.ComfyNode):
         language: str = "",
         prompt: str = "",
         unload_after_execute: bool = False,
+        auto_register: bool = True,
     ) -> io.NodeOutput:
         # audio 是必填输入;缺失或为空时先给出明确错误,避免 numpy 底层晦涩异常。
         if audio is None:
@@ -136,8 +160,19 @@ class AudioCppSpeechToText(io.ComfyNode):
         wav_bytes = audio_dict_to_wav_bytes(audio)
         base_url = build_base_url(host, port)
         check_server(base_url)
+
         from ..interruptible import run_interruptible, to_interruptible
-        from ..audio_cpp_client import unload_all_models
+        from ..audio_cpp_client import ensure_model_registered, unload_all_models
+
+        # 自动注册:新下载/放入 models/ 的模型未注册时首次请求会 500
+        # "unknown model id"。运行时补注册(幂等),失败给中文指引。
+        if auto_register:
+            await run_interruptible(
+                to_interruptible(ensure_model_registered)(
+                    base_url, model, timeout=float(timeout_seconds)
+                ),
+                base_url=base_url,
+            )
 
         try:
             result = await run_interruptible(

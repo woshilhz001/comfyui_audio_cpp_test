@@ -55,6 +55,12 @@ class AudioCppServerInfo(io.ComfyNode):
             f"后端: {health.get('backend')}\n"
             f"配置模型数: {health.get('models')}\n"
             f"已加载(占用显存/内存): {len(loaded)}\n"
-            + ("\n".join(f"  - {name}" for name in loaded) if loaded else "  (无)")
         )
+        # 版本信息:新版 /health 提供 version/git/git_date;旧版构建没有这些
+        # 字段,逐行省略,不显示空值。
+        for field, label in (("version", "版本"), ("git", "Git"), ("git_date", "构建日期")):
+            value = health.get(field)
+            if value:
+                report += f"{label}: {value}\n"
+        report += ("\n".join(f"  - {name}" for name in loaded) if loaded else "  (无)")
         return io.NodeOutput(report, json.dumps(models, indent=2, ensure_ascii=False))

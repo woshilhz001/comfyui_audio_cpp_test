@@ -1,6 +1,6 @@
-"""Shared building blocks for the audio.cpp nodes.
+"""audio.cpp 节点共享构建块。
 
-Keeps the per-node files focused on their own schema and execution logic.
+让各节点文件专注于自身的 schema 与执行逻辑。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from .. import config
 
 
 def server_address_inputs(include_timeout: bool = True, timeout_default: float = None):
-    """Return the shared host/port (+timeout) inputs used by every server node.
+    """返回每个服务器节点共用的 host/port(+timeout)输入。
 
     每个节点都带 host/port,便于单个工作流连接不同的 audio.cpp 服务器;
     默认值来自 config.py,集中管理。
@@ -19,13 +19,13 @@ def server_address_inputs(include_timeout: bool = True, timeout_default: float =
     inputs = [
         io.String.Input(
             "host",
-            display_name="host",
+            display_name="服务器地址",
             default=config.DEFAULT_HOST,
             tooltip="audio.cpp 服务器地址,默认取自 config.py(127.0.0.1)。",
         ),
         io.Int.Input(
             "port",
-            display_name="port",
+            display_name="端口",
             default=config.DEFAULT_PORT,
             min=1,
             max=65535,
@@ -36,7 +36,7 @@ def server_address_inputs(include_timeout: bool = True, timeout_default: float =
         inputs.append(
             io.Float.Input(
                 "timeout_seconds",
-                display_name="timeout_seconds",
+                display_name="超时时间(秒)",
                 default=(timeout_default if timeout_default is not None else config.REQUEST_TIMEOUT),
                 min=1.0,
                 max=3600.0,
