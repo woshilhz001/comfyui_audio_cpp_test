@@ -215,17 +215,21 @@ class AudioCppTextToSpeech(io.ComfyNode):
                     display_name="随机种子",
                     default=-1,
                     min=-1,
+                    max=2048,
                     control_after_generate=io.ControlAfterGenerate.randomize,
-                    tooltip="随机种子,-1 由服务器决定,不传该参数。",
+                    tooltip=(
+                        "随机种子,-1 由服务器决定(不传该参数);最大 2048"
+                        "(ComfyUI 整数控件默认上限,显式声明避免歧义)。"
+                    ),
                 ),
                 io.Boolean.Input(
                     "unload_after_execute",
                     display_name="完成后卸载显存",
-                    default=False,
+                    default=True,
                     tooltip=(
                         "生成完成后自动调用 audio.cpp 的全量卸载接口\n"
                         "(/v1/tasks/unload_all_models),释放该模型占用的显存/内存。\n"
-                        "适合生成完就要让出显存的场景;留 False 则模型保留在内存复用。"
+                        "默认开启;留 False 则模型保留在内存复用。"
                     ),
                 ),
                 io.Boolean.Input(
@@ -284,7 +288,7 @@ class AudioCppTextToSpeech(io.ComfyNode):
         instructions: str = "",
         voice: str = "",
         seed: int = -1,
-        unload_after_execute: bool = False,
+        unload_after_execute: bool = True,
         auto_register: bool = True,
     ) -> io.NodeOutput:
         if not text:

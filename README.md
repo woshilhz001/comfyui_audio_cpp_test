@@ -47,6 +47,26 @@ HTTP 服务的 ComfyUI 自定义节点包。
   释放 audio.cpp 模型占用的显存/内存。适合"生成完就让出显存"的场景;
   不勾选则模型保留在服务器内存中,供后续多次调用快速复用。
 
+## 节点按钮(浏览器快捷操作)
+
+前端扩展 `web/audionode_buttons.js` 给所有 AudioCpp 节点追加可见按钮
+(`serialize: false`,不随工作流持久化,参考 ArcReel 选择器 / Jon LLM 加载器
+的按钮写法):
+
+- **🚫 取消任务**(所有 AudioCpp 节点):触发 ComfyUI 后端的 `POST /interrupt`
+  (与工具栏「停止」同一机制),中断当前正在运行的工作流。生成类节点的可中断
+  `execute` 立即响应;已发出的 GPU 推理仍在服务器上跑完(见上节)。
+- **🗑️ 卸载显存**(仅「AudioCpp 卸载模型(释放显存)」节点):点击先弹
+  `confirm` 确认,确认后**直接**经 ComfyUI 后端代理路由
+  `POST /audionode/unload_models` 卸载模型,无需勾选「确认」再整图执行。
+  按钮显示「⏳ 卸载中…」,完成后节点新增的「状态」行回显卸载报告
+  (卸载前/后加载数量、卸载了哪些模型),失败则回显错误。
+
+  走代理的原因:audio.cpp 服务器默认不开 CORS(`--cors-origins` 默认禁用),
+  浏览器 JS 无法直连 `http://127.0.0.1:8085`,由 ComfyUI 后端转发即可绕开。
+  请求体携带节点当前 `host` / `port` / `mode` / `模型 id`,与整图执行同口径
+  (含 `unload_selected` 必须填模型 id 的校验)。
+
 ## 节点(Add Node 菜单 → audio.cpp)
 
 ### AudioCpp 文本转语音 (AudioCppTextToSpeech)

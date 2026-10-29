@@ -42,7 +42,7 @@ from ..audio_codec import audio_dict_to_wav_bytes, resample_waveform
 from ..config import DEFAULT_HOST, DEFAULT_PORT
 from .. import model_contracts
 from ..model_contracts import family_required_inputs, family_lifts
-from ..model_profiles import all_family_options
+from ..model_profiles import all_family_options, task_language_options
 
 
 # DynamicCombo option 里排除的字段(顶层类型承接或提升到节点顶层,不放进下拉)。
@@ -57,6 +57,11 @@ TASK_TOP_LEVEL_FIELDS = (
 SERVER_AUDIO_FIELD = {
     "vevo2": "target_voice",
 }
+
+# 顶层「语言」下拉选项:全部任务家族声明的具体语言代码并集(去重)。
+# 强制对齐家族需要 language,其余家族忽略该值(不填则不传,无副作用)。
+# import 时计算一次(spec 目录一次性扫描),避免每次构建 schema 都重算。
+LANGUAGE_OPTIONS = task_language_options(tuple(all_family_options("task").keys()))
 
 
 def _input_for(param_id: str, spec):
@@ -108,8 +113,9 @@ def _task_options():
                 inputs.append(inp)
         if not inputs:
             # 空下拉族(spec 无参数):补通用 seed,保证下拉有选项可选。
-            inputs.append(io.Int.Input("seed", display_name="随机种子", default=-1, min=-1,
-                                       tooltip="随机种子,-1 由服务器决定,不传该参数。"))
+            # max=2048 显式声明:未声明 max 时 ComfyUI 前端默认上限就是 2048。
+            inputs.append(io.Int.Input("seed", display_name="随机种子", default=-1, min=-1, max=2048,
+                                       tooltip="随机种子,-1 由服务器决定,不传该参数;最大 2048。"))
         options.append(io.DynamicCombo.Option(family, inputs))
     return options
 
@@ -175,6 +181,17 @@ class AudioCppAudioTask(io.ComfyNode):
                     default="",
                     tooltip="风格/标签文本(如 yue2 的歌曲风格 rock、ballad)。音乐模型专用,其他模型忽略。",
                 ),
+                io.Combo.Input(
+                    "language",
+                    display_name="语言",
+                    options=LANGUAGE_OPTIONS,
+                    default="",
+                    tooltip=(
+                        "转写/提示文本的语言代码(来自 model spec)。\n"
+                        "强制对齐模型(qwen3_forced_aligner / mms_forced_aligner)\n"
+                        "必须有 text + 语言才能运行;其他模型留空即不传该参数。"
+                    ),
+                ),
                 io.Audio.Input(
                     "voice_ref",
                     display_name="参考音频(目标声音)",
@@ -228,10 +245,20 @@ class AudioCppAudioTask(io.ComfyNode):
                 io.Boolean.Input(
                     "unload_after_execute",
                     display_name="完成后卸载显存",
-                    default=False,
+                    default=True,
                     tooltip=(
                         "任务完成后自动调用 /v1/tasks/unload_all_models,\n"
-                        "释放 audio.cpp 模型占用的显存/内存。"
+                        "释放 audio.cpp 模型占用的显存/内存。默认开启。"
+                    ),
+                ),
+                io.Boolean.Input(
+                    "auto_register",
+                    display_name="自动注册未注册模型",
+                    default=True,
+                    tooltip=(
+                        "执行前检查服务器注册表,若该模型尚未注册则自动调\n"
+                        "POST /v1/models/load 补注册(需服务器开 --ui-management)。\n"
+                        "已注册的模型不受影响(幂等)。"
                     ),
                 ),
             ],
@@ -264,9 +291,11 @@ class AudioCppAudioTask(io.ComfyNode):
         audio: Input.Audio = None,
         text: str = "",
         style: str = "",
+        language: str = "",
         voice_ref: Input.Audio = None,
         target_sample_rate: int = 0,
-        unload_after_execute: bool = False,
+        unload_after_execute: bool = True,
+        auto_register: bool = True,
     ) -> io.NodeOutput:
         if not isinstance(model, dict) or "model" not in model:
             raise AudioCppError("模型参数无效:缺少选择的模型 id。")
@@ -319,6 +348,12 @@ class AudioCppAudioTask(io.ComfyNode):
                 f"{family}:该任务必须有「风格(style)」输入(音乐风格描述)。"
                 "请在 style 输入中填写风格,例如 rock、ballad、jpop。"
             )
+        if "language" in required and not language:
+            raise AudioCppError(
+                f"{family}:该任务必须有「语言(language)」输入(转写文本的语言代码)。"
+                "请在「语言」下拉中选择文本对应的语言(如 zh / en / ja)。"
+                "强制对齐模型需要 text + language 才能运行。"
+            )
 
         # ---- 提升到顶层的参数回填(options.lyrics / options.style) ----
         # 音乐家族(yue2/heartmula/minimax_music3)在顶层面板填写歌词/风格,
@@ -331,6 +366,20 @@ class AudioCppAudioTask(io.ComfyNode):
 
         base_url = build_base_url(host, port)
         check_server(base_url)
+
+        # 自动注册:audio.cpp 的注册表与模型文件解耦,新下载/放入 models/ 的
+        # 模型首次请求会 500 "unknown model id"。这里运行时补注册(幂等:
+        # 已注册的直接返回,不占额外时间),失败给中文指引。
+        if auto_register:
+            from ..interruptible import run_interruptible, to_interruptible
+            from ..audio_cpp_client import ensure_model_registered
+
+            await run_interruptible(
+                to_interruptible(ensure_model_registered)(
+                    base_url, family, timeout=float(timeout_seconds)
+                ),
+                base_url=base_url,
+            )
 
         wav_bytes = None
         if audio is not None:
@@ -360,6 +409,7 @@ class AudioCppAudioTask(io.ComfyNode):
                     base_url,
                     family,
                     text=text or None,
+                    language=language or None,
                     audio_wav=wav_bytes,
                     voice_ref_path=voice_ref_path,
                     voice_ref_field=SERVER_AUDIO_FIELD.get(family, "voice_ref"),

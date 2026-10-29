@@ -87,9 +87,9 @@ class AudioCppUnloadModels(io.ComfyNode):
                     "mode",
                     display_name="卸载模式",
                     options=UNLOAD_MODES,
-                    default="check_only",
+                    default="unload_all",
                     tooltip=(
-                        "卸载模式:unload_all 完全释放显存;"
+                        "卸载模式:unload_all 完全释放显存(默认);"
                         "unload_selected 按「模型 id」填写;check_only 只查不卸。"
                     ),
                 ),

@@ -1,0 +1,6 @@
+# comfyui_audio_cpp_test 的额外依赖
+#
+# 只列 ComfyUI 不自带、本扩展直接 import 的模块。
+# ComfyUI 核心已提供: torch / numpy / requests / aiohttp / typing_extensions。
+# pytest 仅测试用, 不在此列。
+soundfile

@@ -95,6 +95,27 @@ class TestContracts(unittest.TestCase):
         self.assertIn("qwen3_asr", models)
         self.assertGreater(len(models), 1)
 
+    def test_align_families_require_text_and_language(self):
+        """强制对齐家族必须有 text + language(服务器 run() 缺一即 500)。"""
+        from comfyui_audio_cpp_test.model_contracts import family_required_inputs
+
+        self.assertEqual(
+            family_required_inputs("qwen3_forced_aligner"), {"audio", "text", "language"}
+        )
+        self.assertEqual(
+            family_required_inputs("mms_forced_aligner"), {"audio", "text", "language"}
+        )
+
+    def test_task_language_options_includes_align_languages(self):
+        from comfyui_audio_cpp_test import model_profiles
+
+        opts = model_profiles.task_language_options(("qwen3_forced_aligner",))
+        # qwen3_forced_aligner spec 声明的 11 种语言应全部出现在下拉里
+        for lang in ("zh", "en", "ja", "ko"):
+            self.assertIn(lang, opts)
+        # 全空家族 → 兜底常见语言,下拉总非空
+        self.assertTrue(model_profiles.task_language_options(()))
+
 
 if __name__ == "__main__":
     unittest.main()

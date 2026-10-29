@@ -11,6 +11,10 @@ from .nodes import (
     AudioCppTextToSpeech,
     AudioCppUnloadModels,
 )
+from . import routes as _routes
+
+#: ComfyUI 自动加载本目录下的 js(前端按钮扩展)。
+WEB_DIRECTORY = "./web"
 
 
 class AudioCppExtension(ComfyExtension):
@@ -23,6 +27,17 @@ class AudioCppExtension(ComfyExtension):
             AudioCppUnloadModels,
             AudioCppServerInfo,
         ]
+
+
+def _register_routes() -> None:
+    """加载插件时尽力注册 /audionode/* 路由(失败静默)。"""
+    try:
+        _routes.register_routes()
+    except Exception:
+        pass
+
+
+_register_routes()
 
 
 async def comfy_entrypoint() -> AudioCppExtension:

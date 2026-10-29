@@ -431,6 +431,7 @@ def task_run(
     model: str,
     *,
     text: str | None = None,
+    language: str | None = None,
     audio_wav: bytes | None = None,
     voice_ref_path: str | None = None,
     voice_ref_field: str = "voice_ref",
@@ -439,10 +440,14 @@ def task_run(
 ) -> dict[str, Any]:
     """POST /v1/tasks/run 返回完整 JSON 结果。
 
-    这是通用任务端点:接受顶层 'text'(字符串)与 'audio'/'voice_ref'
-    (服务器端文件路径)。ComfyUI 音频先经 /v1/ui/upload 上传(见 _stage_audio),
-    再把返回的临时路径传进来,与 build_request_from_json 的
+    这是通用任务端点:接受顶层 'text'(字符串)、'language'(语言代码)与
+    'audio'/'voice_ref'(服务器端文件路径)。ComfyUI 音频先经 /v1/ui/upload 上传
+    (见 _stage_audio),再把返回的临时路径传进来,与 build_request_from_json 的
     resolve_case_path 解析方式一致。
+
+    text + language 一起构成服务器端 text_input(Transcript{text, language}):
+    build_request_from_json 从顶层 'language' 读取语言并与顶层 'text' 合成,
+    两者缺一时强制对齐模型会 500 "requires transcript text and language"。
 
     voice_ref_field 指定参考音频在请求体里使用的顶层字段名:默认
     'voice_ref'(Seed-VC 等);vevo2 等新模型要求 'target_voice'
@@ -459,6 +464,8 @@ def task_run(
     payload: dict[str, Any] = {"model": model}
     if text:
         payload["text"] = text
+    if language:
+        payload["language"] = language
     if options:
         payload["options"] = options
     payload.update(path_options)

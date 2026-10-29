@@ -120,10 +120,10 @@ class AudioCppSpeechToText(io.ComfyNode):
                 io.Boolean.Input(
                     "unload_after_execute",
                     display_name="完成后卸载显存",
-                    default=False,
+                    default=True,
                     tooltip=(
                         "转写完成后自动调用 /v1/tasks/unload_all_models,\n"
-                        "释放 audio.cpp 模型占用的显存/内存。"
+                        "释放 audio.cpp 模型占用的显存/内存。默认开启。"
                     ),
                 ),
                 io.Boolean.Input(
@@ -165,7 +165,7 @@ class AudioCppSpeechToText(io.ComfyNode):
         port: int,
         timeout_seconds: float,
         prompt: str = "",
-        unload_after_execute: bool = False,
+        unload_after_execute: bool = True,
         auto_register: bool = True,
     ) -> io.NodeOutput:
         # audio 是必填输入;缺失或为空时先给出明确错误,避免 numpy 底层晦涩异常。

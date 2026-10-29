@@ -640,6 +640,30 @@ def family_language_options(family: str, first: str = "",
     return [first] + concrete
 
 
+# 强制对齐等语言敏感任务家族的常见语言代码兜底(spec 未声明 languages 时用)。
+# 与 TTS/ASR 的 fallback 保持一致,保证下拉总非空。
+_ALIGN_LANG_FALLBACK = ("en", "zh", "ja", "ko", "de", "fr", "ru", "es", "it", "pt", "yue")
+
+
+def task_language_options(families: tuple[str, ...] = ()) -> list[str]:
+    """通用任务节点顶层「语言」下拉:所选家族支持语言代码的并集(去重)。
+
+    强制对齐家族(qwen3_forced_aligner / mms_forced_aligner)的服务器 run()
+    要求 text_input 同时带非空 text 与 language;language 由节点顶层下拉承接。
+    下拉取所有 families 声明的具体语言代码的并集(spec 的 languages 字段,
+    经 lang_is_concrete 过滤 "multilingual" 等占位条目);全为空时退回常见
+    语言代码兜底,保证下拉总非空。
+    """
+    seen: list[str] = []
+    for family in families:
+        for lang in spec_languages(family):
+            if lang_is_concrete(lang) and lang not in seen:
+                seen.append(lang)
+    if not seen:
+        return list(_ALIGN_LANG_FALLBACK)
+    return seen
+
+
 # 显式「spec 家族 → 手工档案 id」覆盖关系。
 # 手工档案的 key 是「服务器配置的模型 id」(server.json 里的 id),可能与 spec
 # 家族名不同(如 muscriptor_small ← family muscriptor)。只有这里列出的 spec

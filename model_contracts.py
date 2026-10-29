@@ -87,6 +87,12 @@ TASK_INPUT_REQS: dict[str, set[str]] = {
     "mel_band_roformer": {"audio"},
     "audiosr": {"audio"},
     "midashenglm_gen": {"text"},
+    # 强制对齐:服务器 run() 强制要求「源音频 + 转写文本 text + 语言 language」
+    # (build_request_from_json 把顶层 language + text 合成 text_input,缺一即 500
+    #  "requires transcript text and language")。text 是转写文本,language 是
+    # 其语言代码,均走节点顶层输入。
+    "qwen3_forced_aligner": {"audio", "text", "language"},
+    "mms_forced_aligner": {"audio", "text", "language"},
     # controlfoley:官方主路径为「提示词纯生成」,源音频/视频均可选,不强制。
     # ---- audio.cpp 新增任务家族 ----
     "universr": {"audio"},
